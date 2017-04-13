@@ -30,11 +30,11 @@ libfreenect2::Freenect2 freenect2;
 libfreenect2::SyncMultiFrameListener listener(libfreenect2::Frame::Color |
 		libfreenect2::Frame::Depth | libfreenect2::Frame::Ir);
 zbar::ImageScanner scanner;
-int locationAveX=0,locationAveY=0;
+// int locationAveX=0,locationAveY=0;
 
 int setupKinect();
 void startKinect();
-void markQr(const Mat& src, Mat& dst){
+void markQr(const Mat& src, Mat& dst,int *qrx, int *qry){
 	Mat gray;
 	dst = src.clone();
 	cvtColor(src,gray,CV_BGR2GRAY);
@@ -50,16 +50,16 @@ void markQr(const Mat& src, Mat& dst){
 		vector<Point> vp;  
 		// do something useful with results  
 		// std::cout << "symbol \"" << symbol->get_data() <<'"'<< std::endl;  
-		locationAveX=0;
-		locationAveY=0;
+		*qrx=0;
+		*qry=0;
 		int n = symbol->get_location_size();  
 		for(int i=0;i<n;i++){  
 			vp.push_back(Point(symbol->get_location_x(i),symbol->get_location_y(i))); 
-			locationAveX += symbol->get_location_x(i);
-			locationAveY += symbol->get_location_y(i);
+			*qrx += symbol->get_location_x(i);
+			*qry += symbol->get_location_y(i);
 		}  
-		locationAveX /= 4;
-		locationAveY /= 4;
+		*qrx /= 4;
+		*qry /= 4;
 		// std::cout<<"x"<<locationAveX<<"y"<<locationAveY<<std::endl;
 		RotatedRect r = minAreaRect(vp);  
 		Point2f pts[4];  
@@ -67,7 +67,9 @@ void markQr(const Mat& src, Mat& dst){
 		for(int i=0;i<4;i++){  
 			line(dst,pts[i],pts[(i+1)%4],Scalar(255,0,0),3);  
 		}  
-		cv::circle(dst,Point(locationAveX,locationAveY),10,cv::Scalar(255,0,0),3,3);
+		cv::circle(dst,Point(*qrx,*qry),10,cv::Scalar(255,0,0),3,3);
+		*qrx = 512-*qrx;
+		// *qrx *= -1;		//to reverce
 		//cout<<"Angle: "<<r.angle<<endl;  
 	}  
 }
@@ -87,6 +89,15 @@ int main(){
 
 	libfreenect2::FrameMap frames;
 	Mat rgbmat, depthmat, rgbMatRegistered, irmat;
+
+	FILE *gp;
+	// gp = popen("gnuplot","w");
+	gp = popen("gnuplot -persist","w");
+	fprintf(gp,"splot [-2:2][-2:2][-2:2] 0\n");
+	// fprintf(gp,"set label 1 point pt 4 at %f,%f,%f\n",0,0,0);
+	// fprintf(gp,"set label 1 point pt 4 at 0,0,0\n");
+	// fprintf(gp,"replot\n");
+	// pclose(gp);
 	//! [loop start]
 	while(!protonect_shutdown){
 		listener.waitForNewFrame(frames);
@@ -102,26 +113,47 @@ int main(){
 		cv::Mat rgbMatRegistered=cv::Mat(registered.height,registered.width,CV_8UC4,
 				registered.data);
 
-		cv::Mat res;
-		// cv::Mat res(rgbmat,cv::Rect(420,0,1000,1000));
-		cv::resize(rgbmat,res,cv::Size(),0.5,0.5);
-		cv::flip(res,res,1);	//reverce
+		int cutX=260;
+		// cv::Mat res;
+		cv::Mat resRgb(rgbmat,cv::Rect(cutX,0,1920-cutX-197,1080));
+		cv::resize(resRgb,resRgb,cv::Size(),0.35,0.35);
+		cv::Mat resDepth(depthmat/4096.0f,cv::Rect(0,0,512,378));
+		// cv::flip(res,res,1);	//reverce
 		cv::flip(rgbMatRegistered,rgbMatRegistered,1);	//reverce
-
+		int qrx=0,qry=0;
+		markQr(rgbMatRegistered,rgbMatRegistered,&qrx,&qry);
+		cv::flip(rgbMatRegistered,rgbMatRegistered,1);	//reverce
 		// cv::imshow("ir", irmat / 4096.0f);
 		// cv::imshow("depth", depthmat / 4096.0f);
 
-		// markQr(res,res);
-		markQr(rgbMatRegistered,rgbMatRegistered);
 		registration->apply(rgb, depth, &undistorted, &registered);
 		float x,y,z;
-		registration->getPointXYZ(&undistorted,locationAveX,locationAveY,x,y,z);
-		std::cout<<"x:"<<x<<"y:"<<y<<"z:"<<z<<std::endl;
+		registration->getPointXYZ(&undistorted,qry,qrx,x,y,z);
 
-		cv::flip(res,res,1);	//reverce
-		cv::flip(rgbMatRegistered,rgbMatRegistered,1);	//reverce
-		// cv::imshow("res", res);
+		static int cnt=0;
+		if(cnt++>5 && z < 1.5){
+			pclose(gp);
+			// gp = popen("gnuplot","w");
+			gp = popen("gnuplot -persist","w");
+			fprintf(gp,"splot [-0.5:0.5][0.5:-0.5][0.7:1.5] 0.7\n");
+			fprintf(gp,"set xlabel 'x[m]'\n");
+			fprintf(gp,"set ylabel 'y[m]'\n");
+			fprintf(gp,"set zlabel 'z[m]'\n");
+			fprintf(gp,"set label 1 point pt 4 at %f,%f,%f\n",x,y,z);
+			fprintf(gp,"set label 2 point pt 3 at %f,%f,%f\n",x,0.5,0.7);
+			fprintf(gp,"set label 3 point pt 3 at %f,%f,%f\n",0.5,y,0.7);
+			fprintf(gp,"set label 4 point pt 3 at %f,%f,%f\n",-0.5,0.5,z);
+			// fprintf(gp,"set label 1 point pt 4 at 0,0,0\n");
+			fprintf(gp,"replot\n");
+			cnt=0;
+		}
+		std::cout<<x<<":"<<y<<":"<<z<<":"<<resDepth.at<float>(qry,qrx)*4<<":"<<qrx<<std::endl;
+		cv::circle(resRgb,Point(qrx,qry),10,cv::Scalar(0,255,0),3,3);
+		// cv::flip(res,res,1);	//reverce
+		// cv::flip(rgbMatRegistered,rgbMatRegistered,1);	//reverce
 		cv::imshow("rgbMatRegistered", rgbMatRegistered);
+		cv::imshow("resRgb", resRgb);
+		cv::imshow("depthmat", resDepth);
 		protonect_shutdown = protonect_shutdown || (cv::waitKey(1) == 27); // shutdown on escape
 
 		listener.release(frames);
